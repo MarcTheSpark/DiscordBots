@@ -1,6 +1,8 @@
 import os
 import random
 import io
+import json
+from datetime import datetime, timezone
 import requests
 from requests.auth import HTTPBasicAuth
 from pydub import AudioSegment
@@ -19,6 +21,7 @@ NEXTCLOUD_URL = os.environ["NEXTCLOUD_URL"]
 
 SUBMISSIONS_REMOTE_PATH = "ClipBotLibrary"
 CLIPS_PATH = "clips"
+LOG_PATH = "clip_log.json"
 CLIP_LENGTH_MS = 10000
 FADE_MS = 1000
 MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024  # 30 MB
@@ -132,8 +135,27 @@ def slugify(text):
     return "".join(c if c.isalnum() else "_" for c in text)
 
 
+def load_log():
+    """Return the list of past snippet entries (newest appended last)."""
+    if not os.path.exists(LOG_PATH):
+        return []
+    with open(LOG_PATH) as f:
+        return json.load(f)
+
+
+def append_log(entry):
+    log = load_log()
+    log.append(entry)
+    with open(LOG_PATH, "w") as f:
+        json.dump(log, f, indent=2)
+
+
 def pick_random_clip():
-    """Pick a random mp3 from the Nextcloud submissions folder, clip it, return metadata."""
+    """Pick an mp3 from the submissions folder, clip it, return metadata.
+
+    Prefers files that have never been used before; only revisits a previously
+    used file once every available file has been used at least once.
+    """
     items = list_remote_files(SUBMISSIONS_REMOTE_PATH)
     mp3_files = [
         item["name"] for item in items
@@ -142,47 +164,56 @@ def pick_random_clip():
     if not mp3_files:
         raise RuntimeError("No mp3 files found in submissions folder")
 
-    filename = random.choice(mp3_files)
-    print(f"Selected: {filename}")
+    visited = {entry["filename"] for entry in load_log()}
+    unvisited = [f for f in mp3_files if f not in visited]
+    revisit = [f for f in mp3_files if f in visited]
+    random.shuffle(unvisited)
+    random.shuffle(revisit)
+    candidates = unvisited + revisit  # try every new file before any repeat
 
-    mp3_bytes = download_remote(f"{SUBMISSIONS_REMOTE_PATH}/{filename}")
-    audio = AudioSegment.from_file(io.BytesIO(mp3_bytes))
+    for filename in candidates:
+        print(f"Selected: {filename}")
+        mp3_bytes = download_remote(f"{SUBMISSIONS_REMOTE_PATH}/{filename}")
+        audio = AudioSegment.from_file(io.BytesIO(mp3_bytes))
 
-    if len(audio) < CLIP_LENGTH_MS:
-        print(f"  Too short ({len(audio)}ms), picking another")
-        return pick_random_clip()
+        if len(audio) < CLIP_LENGTH_MS:
+            print(f"  Too short ({len(audio)}ms), picking another")
+            continue
 
-    artist, title = get_artist_and_title(mp3_bytes, filename)
+        artist, title = get_artist_and_title(mp3_bytes, filename)
 
-    start_ms = random.randint(0, len(audio) - CLIP_LENGTH_MS)
-    end_ms = start_ms + CLIP_LENGTH_MS
-    clip = audio[start_ms:end_ms].fade_in(FADE_MS).fade_out(FADE_MS)
+        start_ms = random.randint(0, len(audio) - CLIP_LENGTH_MS)
+        end_ms = start_ms + CLIP_LENGTH_MS
+        clip = audio[start_ms:end_ms].fade_in(FADE_MS).fade_out(FADE_MS)
 
-    os.makedirs(CLIPS_PATH, exist_ok=True)
-    start_seconds = start_ms // 1000
-    end_seconds = end_ms // 1000
-    clip_filename = f"{slugify(artist)}_{slugify(title)}_{start_seconds}-{end_seconds}.mp3"
-    clip_path = os.path.join(CLIPS_PATH, clip_filename)
-    clip.export(clip_path, format="mp3")
+        os.makedirs(CLIPS_PATH, exist_ok=True)
+        start_seconds = start_ms // 1000
+        end_seconds = end_ms // 1000
+        clip_filename = f"{slugify(artist)}_{slugify(title)}_{start_seconds}-{end_seconds}.mp3"
+        clip_path = os.path.join(CLIPS_PATH, clip_filename)
+        clip.export(clip_path, format="mp3")
 
-    return (
-        clip_path,
-        title,
-        artist,
-        format_timestamp(start_ms),
-        format_timestamp(end_ms),
-    )
+        return (
+            clip_path,
+            filename,
+            title,
+            artist,
+            format_timestamp(start_ms),
+            format_timestamp(end_ms),
+        )
+
+    raise RuntimeError("No mp3 files long enough to clip")
 
 
 def post_snippet():
-    clip_path, title, artist, start_str, end_str = pick_random_clip()
+    clip_path, source_file, title, artist, start_str, end_str = pick_random_clip()
     message = (
         f"Happy Snippet Saturday! Today's snippet is {start_str}-{end_str} "
         f"from **{title}** by **{artist}**! What do you notice? Anything that stands out? "
-        f"That moves or surprises you? Or did I randomly select a really stupid clip this week?"
+        f"That moves or surprises you? Or did I randomly select a really stupid clip this week? "
         f"Remember, the most important thing in any discussion is to come across as cool and aloof.\n\n"
-        f"_Want your music featured? Drop an mp3 (max 30 MB) at {SUBMISSION_URL}, "
-        f"named like `Artist_Name~Track_Title.mp3` (underscores for spaces, tilde between artist and title)._"
+        f"*Want your music featured? Drop an mp3 (max 30 MB) at {SUBMISSION_URL}, "
+        f"named like `Artist_Name~Track_Title.mp3` (underscores for spaces, tilde between artist and title).*"
     )
 
     with open(clip_path, "rb") as f:
@@ -193,6 +224,16 @@ def post_snippet():
         )
 
     response.raise_for_status()
+
+    append_log({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "filename": source_file,
+        "artist": artist,
+        "title": title,
+        "start": start_str,
+        "end": end_str,
+        "clip": os.path.basename(clip_path),
+    })
     print(f"Posted: {title} by {artist} ({start_str}-{end_str})")
 
 
