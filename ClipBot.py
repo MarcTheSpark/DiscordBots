@@ -212,7 +212,7 @@ def post_snippet():
         f"from **{title}** by **{artist}**! What do you notice? Anything that stands out? "
         f"That moves or surprises you? Or did I randomly select a really stupid clip this week? "
         f"Remember, the most important thing in any discussion is to come across as cool and aloof.\n\n"
-        f"*Want your music featured? Drop an mp3 (max 30 MB) at {SUBMISSION_URL}, "
+        f"*Want your (or someone else's) music featured? Drop an mp3 (max 30 MB) at {SUBMISSION_URL}, "
         f"named like `Artist_Name~Track_Title.mp3` (underscores for spaces, tilde between artist and title).*"
     )
 
